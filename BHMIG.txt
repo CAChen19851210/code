@@ -1,0 +1,116 @@
+pow<-function(x,y){
+  x^y
+}
+cohortsize=c(14,10)
+ntype=6
+p.true=c(0.2,0.2,0.2,0.2,0.2,0.2)
+p0=0.2
+p1=0.4
+p.null=rep(p0,ntype)
+p.target=rep(p1,ntype)
+ntrial=5000 
+mu.par=log(p.null[1]/(1-p.null[1]))-log(p.target[1]/(1-p.target[1]))
+
+
+ 
+library(R2jags)
+#effect size: log odds of response
+effectsize=function(pa,pb){
+log(pa/(1-pa))-log(pb/(1-pb))
+}
+# JAGS main model for MCMC 
+
+berrymodel<-function(){
+  for (j in 1:ntype){                
+    y[j]~ dbin(p[j],n[j])
+    p[j]<-exp(theta[j]+log(p.target[j]/(1-p.target[j])))/(1+exp(theta[j]+log(p.target[j]/(1-p.target[j]))))
+    
+  }
+  for (j in 1:ntype){
+    theta[j]~ dnorm(mu,tau)      
+  }
+  sigma2<-1/tau                    #variance=sigma2
+  mu ~ dnorm(mu.par, 0.001)         #prior on mu
+  tau ~ dgamma(0.001,0.001)    #prior on tau
+}
+
+# parameters of interest
+jags.params<-c("theta","p")
+# initial value 
+jags.inits<-function(){
+  list("theta"=effectsize(p.true,p.target),"mu"=mu.par,"tau"=1/15)
+}
+
+
+p.est=matrix(0, nrow=ntrial, ncol=ntype)                   # store the estimated response rate for each disease type
+sample.size<-matrix(0, nrow=ntrial,ncol=ntype)              # store the maximum sample size used for each disease type
+ncohort<-length(cohortsize)
+arm.count<-matrix(0, nrow=ntrial, ncol=ncohort)             # store the number of disease groups that did not stop early at each interim analysis
+  
+  
+efficacy<-NULL
+eff.prob.store<-matrix(0,nrow=ntrial,ncol=ntype)
+sd=matrix(0,nrow=ntrial,ncol=ntype)
+futstop<-0.05                                              # futulity stopping cutoff
+
+trial=1
+for (trial in 1:ntrial){
+    
+    n<-numeric(ntype)
+    y<-numeric(ntype)
+    stopping<-numeric(ntype)
+    presponse<-p.true
+    csize<-matrix(cohortsize, nrow=ncohort, ncol=ntype)
+    
+    for (i in 1:ncohort){
+    
+    # generate data for a new cohort of patients
+      y = y + rbinom(rep(1,ntype), cohortsize[i], presponse);
+      n = n + csize[i,];
+    
+      if (i != ncohort){ # interim analysis
+        arm.count[trial, i]<-length(y[which(stopping==0)])
+        jags.data<-list("y","n","ntype","p.target","mu.par")
+        jagsfit<-jags(data=jags.data,inits=jags.inits, jags.params, n.iter=20000,model.file=berrymodel)
+        jagsfit.upd<-autojags(jagsfit, n.update=1000, n.iter=10000)
+        pres.est<-jagsfit.upd[[2]]$sims.list$p                                                    # extract the mcmc samples of p
+        fut.prob<-sapply(seq(1,ntype,1), function(x) mean(pres.est[,x]>(p.null[x]+p.target[x])/2)) # calculate the futility probability
+        stopping[which(fut.prob<futstop)]<-1                                                      # stop if the probability <0.05
+        sample.size[trial, which(stopping==1)]<-n[which(stopping==1)]
+        
+        if (1 %in% stopping){ # update the response rate and sample size for those early stopped arms to ensure that no more patients will be treated
+          presponse[which(stopping==1)]<-rep(0,length(which(stopping==1)))
+          csize[(i+1),which(stopping==1)]<-rep(0,length(which(stopping==1)))
+        }
+        if (!(0 %in% stopping)){ # when all groups have stopped for futility
+          arm.count[trial, i+1]<-0
+          eff.prob<-sapply(seq(1,ntype,1), function(x) mean(pres.est[,x]>p.null[x]))
+          eff.prob.store[trial,]<-eff.prob
+          p.est[trial,]<-jagsfit.upd[[2]]$mean$p                                       # store the rate estimate for each disease type
+          sd[trial,]<-jagsfit.upd[[2]]$sd$p
+          sample.size[trial,]<-n                                                       # store the maximum sample size used for each disease subgroup
+          break                                                                        # stop simulating patients if all subgroups have stopped
+        }  
+      } else{ # final analysis
+          arm.count[trial, i]<-length(y[which(stopping==0)])
+          jags.data<-list("y","n","ntype","p.target","mu.par")
+          jagsfit<-jags(data=jags.data,inits=jags.inits, jags.params, n.iter=20000,model.file=berrymodel)
+          jagsfit.upd<-autojags(jagsfit,n.update=1000, n.iter=10000)
+          pres.est<-jagsfit.upd[[2]]$sims.list$p
+          eff.prob<-sapply(seq(1,ntype,1), function(x) mean(pres.est[,x]>p.null[x]))
+          eff.prob.store[trial,]<-eff.prob
+          p.est[trial,]<-jagsfit.upd[[2]]$mean$p                                       # store the rate estimate for each disease type      
+          sd[trial,]<-jagsfit.upd[[2]]$sd$p 
+          sample.size[trial,which(stopping==0)]<-n[which(stopping==0)]                 # store the maximum sample size used for each disease type      
+      }  
+    }
+    print(trial)
+    
+    
+}
+
+c1=0.833
+colMeans(((eff.prob.store>c1)*1))
+colMeans(sample.size==14)
+colMeans(sample.size)
+sum(colMeans(sample.size))
